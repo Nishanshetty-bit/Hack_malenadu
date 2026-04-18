@@ -23,7 +23,7 @@ class ReviewDeduplicator:
     2. TF-IDF + cosine similarity (near-duplicate clustering)
     """
 
-    def __init__(self, similarity_threshold: float = 0.85):
+    def __init__(self, similarity_threshold: float = 0.78):
         """
         Args:
             similarity_threshold: Cosine similarity threshold for near-duplicates (0-1).
@@ -32,11 +32,11 @@ class ReviewDeduplicator:
         self.similarity_threshold = similarity_threshold
 
     def _normalize_for_hash(self, text: str) -> str:
-        """Normalize text for exact-match comparison."""
+        """Normalize text for exact-match comparison aggressively."""
         import re
         text = text.lower().strip()
-        text = re.sub(r"\s+", " ", text)
-        text = re.sub(r"[^\w\s]", "", text)
+        # Remove all punctuation and spaces for a strict "skeleton" hash
+        text = re.sub(r"[^a-z0-9]", "", text)
         return text
 
     def _hash_text(self, text: str) -> str:

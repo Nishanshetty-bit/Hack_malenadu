@@ -116,7 +116,7 @@ def run_pipeline(raw_reviews: List[Dict], ingestion_id: int) -> Dict:
             "translated_text": analysis_text if lang_result.get("was_translated") else None,
             "detected_language": lang_code,
             "rating": rating,
-            "product_category": raw.get("product", raw.get("category", "General")),
+            "product_category": raw.get("product_category", raw.get("product", raw.get("category", "General"))),
             "review_date": raw.get("date", raw.get("review_date")),
             "preprocessing_notes": prep_result["notes"],
             "emoji_extracted": prep_result.get("emoji_extracted", []),
@@ -535,9 +535,30 @@ async def get_review_features(review_id: int):
 
 
 @app.get("/trends")
-async def get_trends(category: str = Query("General")):
+async def get_trends(
+    category: str = Query("General"), 
+    start_date: Optional[str] = None, 
+    end_date: Optional[str] = None
+):
     """Get temporal trends and anomalies for a specific product category."""
-    return trend_analyzer.get_trends(category)
+    return trend_analyzer.get_trends(category, start_date, end_date)
+
+
+@app.get("/alerts")
+async def get_alerts(
+    status: Optional[str] = Query(None),
+    team: Optional[str] = Query(None)
+):
+    """Fetch all active or resolved anomalies."""
+    return {"alerts": db.get_alerts(status, team)}
+
+
+@app.post("/alerts/resolve/{alert_id}")
+async def resolve_alert(alert_id: int):
+    """Mark an alert as resolved."""
+    db.resolve_alert(alert_id)
+    return {"success": True, "message": f"Alert {alert_id} resolved"}
+
 
 
 # ── Standalone Analysis Endpoints ─────────────────────────────────
@@ -575,6 +596,57 @@ async def analyze_sentiment(review: Dict[str, Any]):
     return sentiment_analyzer.analyze(text, rating)
 
 
+# ── Category Cross-Comparison ─────────────────────────────────────
+
+@app.get("/category-comparison")
+async def category_comparison():
+    """Get per-category aggregated stats for cross-comparison."""
+    return {"categories": db.get_category_comparison()}
+
+
+# ── Downloadable Report ──────────────────────────────────────────
+
+@app.get("/export-report")
+async def export_report(format: str = Query("json")):
+    """Export comprehensive analytics report as JSON or CSV."""
+    report = db.get_report_data()
+
+    if format == "csv":
+        # Generate CSV content for reviews
+        output = io.StringIO()
+        if report["reviews"]:
+            fieldnames = [
+                "id", "original_text", "detected_language", "rating",
+                "sentiment_label", "sentiment_score", "fake_score",
+                "is_suspicious", "is_duplicate", "is_ambiguous",
+                "product_category", "review_date", "features"
+            ]
+            writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            for rev in report["reviews"]:
+                row = {**rev}
+                row["features"] = "; ".join(
+                    f"{f['feature']}({f['sentiment']},{f.get('confidence', 0):.0%})"
+                    for f in rev.get("features", [])
+                )
+                writer.writerow(row)
+
+        return JSONResponse(content={
+            "format": "csv",
+            "filename": f"insightiq_report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            "content": output.getvalue(),
+            "summary": report["summary"],
+            "feature_insights": report["feature_insights"],
+            "category_comparison": report["category_comparison"],
+        })
+
+    return JSONResponse(content={
+        "format": "json",
+        "filename": f"insightiq_report_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+        **report,
+    })
+
+
 # ── Reset (for testing) ──────────────────────────────────────────
 
 @app.post("/reset")
@@ -594,4 +666,4 @@ async def reset_database():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

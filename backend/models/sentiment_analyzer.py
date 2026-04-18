@@ -4,6 +4,7 @@ Extracts aspect-level sentiment and flags ambiguous or sarcastic reviews.
 """
 
 import re
+import difflib
 from typing import Dict, List, Optional, Tuple
 
 
@@ -46,7 +47,7 @@ class SentimentAnalyzer:
     }
 
     NEGATORS = {"not", "no", "never", "n't", "cannot", "hardly", "barely", "doesn't", "don't", "didn't"}
-    INTENSIFIERS = {"very", "really", "extremely", "super", "so", "too", "absolutely", "insanely", "highly"}
+    INTENSIFIERS = {"very", "really", "extremely", "super", "so", "too", "absolutely", "insanely", "highly", "entirely", "completely", "totally"}
 
     # Pattern for splitting text into clauses (simplified)
     CLAUSE_SPLIT_PATTERN = re.compile(r'[.,;!\n]|\b(and|but|however|although|though)\b')
@@ -62,6 +63,10 @@ class SentimentAnalyzer:
                 return feature
             # simple plural handling
             if word_lower.endswith('s') and word_lower[:-1] in keywords:
+                return feature
+            # Fuzzy match for typos
+            matches = difflib.get_close_matches(word_lower, keywords, n=1, cutoff=0.8)
+            if matches:
                 return feature
         return None
 
@@ -91,9 +96,18 @@ class SentimentAnalyzer:
                 sentiment_val = -1.0
 
             if sentiment_val != 0:
-                final_val = sentiment_val * intensifier
                 if negated:
-                    final_val *= -0.5  # not perfect -> typically mildly negative or neutral
+                    if sentiment_val > 0:
+                        # "not good" -> purely negative
+                        final_val = -0.5 * sentiment_val * intensifier
+                    else:
+                        # "not bad" -> slightly positive (0.5)
+                        # "not entirely bad" -> more neutral (0.2)
+                        final_val = 0.5 * abs(sentiment_val)
+                        if intensifier > 1.0:
+                            final_val = 0.2 * abs(sentiment_val)
+                else:
+                    final_val = sentiment_val * intensifier
                 
                 score += final_val
                 confidence += 0.5 * intensifier

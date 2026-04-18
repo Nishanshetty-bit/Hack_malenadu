@@ -86,6 +86,18 @@ def init_db():
             language_distribution TEXT DEFAULT '{}',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            message TEXT,
+            assigned_team TEXT,
+            status TEXT DEFAULT 'open',
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
     """)
 
     # Try to alter table for existing DBs
@@ -393,6 +405,62 @@ def get_ingestion_logs(limit: int = 20) -> List[Dict]:
     return result
 
 
+# ─── Alert Operations ─────────────────────────────────────────────
+
+def insert_alert(alert: Dict) -> int:
+    """Insert a new trend alert."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO alerts (feature, alert_type, severity, message, assigned_team)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        alert.get("feature"),
+        alert.get("type"),
+        alert.get("severity"),
+        alert.get("message"),
+        alert.get("assigned_team")
+    ))
+    alert_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return alert_id
+
+
+def get_alerts(status: Optional[str] = None, team: Optional[str] = None) -> List[Dict]:
+    """Fetch alerts with optional status and team filtering."""
+    conn = get_connection()
+    query = "SELECT * FROM alerts WHERE 1=1"
+    params = []
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    if team:
+        query += " AND assigned_team = ?"
+        params.append(team)
+    
+    query += " ORDER BY detected_at DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def resolve_alert(alert_id: int):
+    """Mark an alert as resolved."""
+    conn = get_connection()
+    conn.execute("UPDATE alerts SET status = 'resolved' WHERE id = ?", (alert_id,))
+    conn.commit()
+    conn.close()
+
+
+def clear_stale_alerts():
+    """Clear open alerts to prevent duplication before a fresh trend analysis."""
+    conn = get_connection()
+    conn.execute("DELETE FROM alerts WHERE status = 'open'")
+    conn.commit()
+    conn.close()
+
+
 # ─── Stats & Analytics ────────────────────────────────────────────
 
 def get_dashboard_stats(start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
@@ -505,6 +573,152 @@ def get_dashboard_stats(start_date: Optional[str] = None, end_date: Optional[str
         "sentiment_distribution": sentiment_distribution,
         "recent_ingestions": recent_ingestions,
         "quality_score": quality_score,
+    }
+
+
+# ─── Category Cross-Comparison ────────────────────────────────────
+
+def get_category_comparison() -> List[Dict]:
+    """Get per-category aggregated stats for cross-comparison."""
+    conn = get_connection()
+
+    # Get all categories
+    cat_rows = conn.execute(
+        "SELECT DISTINCT product_category FROM reviews WHERE product_category IS NOT NULL ORDER BY product_category"
+    ).fetchall()
+
+    categories = []
+    for cat_row in cat_rows:
+        cat = cat_row["product_category"]
+        if not cat or cat == "General":
+            continue
+
+        # Basic counts
+        total = conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE product_category = ?", (cat,)
+        ).fetchone()[0]
+
+        if total == 0:
+            continue
+
+        # Sentiment distribution
+        sent_rows = conn.execute(
+            "SELECT sentiment_label, COUNT(*) as cnt FROM reviews WHERE product_category = ? AND sentiment_label IS NOT NULL GROUP BY sentiment_label",
+            (cat,)
+        ).fetchall()
+        sentiment = {r["sentiment_label"]: r["cnt"] for r in sent_rows}
+
+        pos = sentiment.get("positive", 0) + sentiment.get("very_positive", 0)
+        neg = sentiment.get("negative", 0) + sentiment.get("very_negative", 0)
+        neu = sentiment.get("neutral", 0) + sentiment.get("mixed", 0)
+
+        # Average rating
+        avg_rating = conn.execute(
+            "SELECT AVG(rating) FROM reviews WHERE product_category = ? AND rating IS NOT NULL", (cat,)
+        ).fetchone()[0] or 0
+
+        # Suspicious count
+        suspicious = conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE product_category = ? AND is_suspicious = 1", (cat,)
+        ).fetchone()[0]
+
+        # Top features for this category
+        feat_rows = conn.execute("""
+            SELECT fs.feature, fs.sentiment, COUNT(*) as cnt
+            FROM feature_sentiments fs
+            JOIN reviews r ON fs.review_id = r.id
+            WHERE r.product_category = ?
+            GROUP BY fs.feature, fs.sentiment
+            ORDER BY cnt DESC
+        """, (cat,)).fetchall()
+
+        feature_stats = {}
+        for fr in feat_rows:
+            feat = fr["feature"]
+            if feat not in feature_stats:
+                feature_stats[feat] = {"positive": 0, "negative": 0, "neutral": 0, "mixed": 0, "total": 0}
+            feature_stats[feat][fr["sentiment"]] = fr["cnt"]
+            feature_stats[feat]["total"] += fr["cnt"]
+
+        top_features = sorted(feature_stats.items(), key=lambda x: x[1]["total"], reverse=True)[:5]
+        top_features_list = [{"feature": f, **s} for f, s in top_features]
+
+        # Top complaint (most negative feature)
+        top_complaint = None
+        top_praise = None
+        for f, s in sorted(feature_stats.items(), key=lambda x: x[1]["negative"], reverse=True):
+            if s["negative"] > 0:
+                top_complaint = f
+                break
+        for f, s in sorted(feature_stats.items(), key=lambda x: x[1]["positive"], reverse=True):
+            if s["positive"] > 0:
+                top_praise = f
+                break
+
+        categories.append({
+            "category": cat,
+            "total_reviews": total,
+            "positive": pos,
+            "negative": neg,
+            "neutral": neu,
+            "positive_pct": round(pos / max(total, 1) * 100, 1),
+            "negative_pct": round(neg / max(total, 1) * 100, 1),
+            "neutral_pct": round(neu / max(total, 1) * 100, 1),
+            "avg_rating": round(avg_rating, 2),
+            "suspicious_count": suspicious,
+            "top_features": top_features_list,
+            "top_complaint": top_complaint,
+            "top_praise": top_praise,
+            "sentiment_score": round((pos - neg) / max(total, 1) * 100, 1),
+        })
+
+    conn.close()
+    return categories
+
+
+def get_report_data() -> Dict[str, Any]:
+    """Get comprehensive data for downloadable report."""
+    conn = get_connection()
+
+    # All reviews with features
+    review_rows = conn.execute(
+        "SELECT id, original_text, cleaned_text, detected_language, rating, sentiment_label, sentiment_score, "
+        "fake_score, is_suspicious, is_duplicate, is_ambiguous, product_category, review_date "
+        "FROM reviews ORDER BY review_date DESC"
+    ).fetchall()
+
+    reviews_export = []
+    for row in review_rows:
+        d = dict(row)
+        # Get features for this review
+        feat_rows = conn.execute(
+            "SELECT feature, sentiment, confidence FROM feature_sentiments WHERE review_id = ?",
+            (d["id"],)
+        ).fetchall()
+        d["features"] = [dict(f) for f in feat_rows]
+        reviews_export.append(d)
+
+    # Overall stats
+    stats = get_dashboard_stats()
+
+    # Feature summary
+    feature_summary = get_feature_summary()
+
+    # Category comparison
+    category_comparison = get_category_comparison()
+
+    # Alerts
+    alerts = get_alerts()
+
+    conn.close()
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "summary": stats,
+        "feature_insights": feature_summary,
+        "category_comparison": category_comparison,
+        "alerts": alerts,
+        "reviews": reviews_export,
     }
 
 

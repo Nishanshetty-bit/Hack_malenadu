@@ -14,7 +14,7 @@ class FakeReviewDetector:
     Each signal contributes a weighted score. Reviews above threshold are flagged.
     """
 
-    FAKE_THRESHOLD = 0.38  # Score >= this → flagged as suspicious
+    FAKE_THRESHOLD = 0.45  # Score >= this → flagged as suspicious
 
     # Known bot/template phrases (normalized lowercase)
     TEMPLATE_PHRASES = [
@@ -57,16 +57,17 @@ class FakeReviewDetector:
     # Signal weights — intentionally sum > 1.0 so strong multi-signal reviews
     # easily cross the threshold. Single weak signals stay low.
     WEIGHTS = {
-        "too_short": 0.15,
+        "too_short": 0.10,
         "too_long": 0.08,
         "all_caps": 0.22,
         "repeated_chars": 0.15,
         "repeated_words": 0.15,
         "excessive_punctuation": 0.18,
-        "template_match": 0.28,
+        "template_match": 0.20,
         "emoji_spam": 0.14,
         "low_info_density": 0.12,
         "rating_mismatch": 0.15,
+        "spaced_text": 0.25,
     }
 
     def __init__(self):
@@ -118,7 +119,7 @@ class FakeReviewDetector:
 
         # ── Signal 3: ALL CAPS ───────────────────────────
         alpha_chars = [c for c in text if c.isalpha()]
-        if len(alpha_chars) > 5:
+        if len(alpha_chars) > 5 and word_count > 4:
             caps_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
             if caps_ratio > 0.8:
                 signals["all_caps"] = 1.0
@@ -220,6 +221,20 @@ class FakeReviewDetector:
                 signals["rating_mismatch"] = 0.0
         else:
             signals["rating_mismatch"] = 0.0
+        # ── Signal 11: Spaced Out Text (Obfuscation) ────
+        if word_count > 4:
+            # Count single characters separated by spaces
+            single_char_words = [w for w in text.split() if len(w) == 1 and w.isalpha()]
+            spaced_ratio = len(single_char_words) / word_count
+            if spaced_ratio > 0.6:
+                signals["spaced_text"] = 1.0
+                flags.append(f"Spaced out text detected (obfuscation risk: {spaced_ratio:.0%})")
+            elif spaced_ratio > 0.3:
+                signals["spaced_text"] = 0.5
+            else:
+                signals["spaced_text"] = 0.0
+        else:
+            signals["spaced_text"] = 0.0
 
         # ── Compute weighted score ───────────────────────
         total_score = 0.0

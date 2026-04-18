@@ -39,7 +39,7 @@ EMOJI_MAP = {
     "😊": "smile", "🥳": "partying", "😻": "heart_eyes_cat",
 }
 
-# Slang expander dictionary
+# Slang & Hinglish/Kanglish expander dictionary
 SLANG_MAP = {
     "awsm": "awesome", "awsome": "awesome", "gud": "good", "gd": "good",
     "idk": "i do not know", "brb": "be right back", "lol": "laughing out loud",
@@ -48,6 +48,9 @@ SLANG_MAP = {
     "bcoz": "because", "bcaz": "because", "k": "ok", "okey": "okay",
     "gr8": "great", "prodt": "product", "osm": "awesome", "nyc": "nice",
     "lve": "love", "dis": "this", "dat": "that", "wat": "what",
+    "boht": "very", "accha": "good", "sahi": "right", "mast": "awesome",
+    "bekaar": "bad", "bakwas": "nonsense", "swalpa": "little", "beku": "want",
+    "superagide": "super", "chennagide": "good", "alla": "not", "illa": "no"
 }
 
 # Common template/generic phrases that indicate low-quality or bot reviews
@@ -202,9 +205,7 @@ class TextPreprocessor:
         text = self._multi_space.sub(" ", text).strip()
 
         # Step 11: Basic sentence splitting for run-on text
-        # If text is very long with no punctuation, add periods at likely boundaries
         if len(text) > 200 and text.count(".") < 2 and text.count("!") < 2:
-            # Try splitting at common conjunctions when sentence is very long
             text = re.sub(
                 r"\b(but|however|although|also|and then|then|moreover|furthermore)\b",
                 r". \1",
@@ -212,6 +213,12 @@ class TextPreprocessor:
                 flags=re.IGNORECASE,
             )
             notes.append("run_on_sentence_split")
+            
+        # Step 12: Incomplete Sentence Check
+        # e.g., Just "good", "not bad", "awsm" without any subject.
+        word_count = len(text.split())
+        if word_count <= 2:
+            notes.append("incomplete_sentence")
 
         return {
             "cleaned_text": text,
